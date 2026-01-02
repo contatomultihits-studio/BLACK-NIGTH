@@ -11,8 +11,9 @@ export interface Reservation {
   day: ReservationDay;
   type: ReservationType;
   number: string;
-  status: 'available' | 'reserved' | 'blocked';
+  status: 'available' | 'reserved' | 'blocked' | 'pending';
   price: number;
+  expires_at?: number; // Timestamp para expiração do bloqueio temporário
   customer?: {
     fullName: string;
     birthDate: string;
@@ -20,11 +21,11 @@ export interface Reservation {
     phone: string;
     guests: string[];
     timestamp: number;
-    receipt?: string; // Base64 string of the uploaded receipt
+    receipt?: string;
     age: string;
   };
 }
 
 export interface PriceConfig {
-  [id: string]: number; // key format: "Day|Type|Number"
+  [id: string]: number;
 }

@@ -1,15 +1,18 @@
 
 import React, { useState, useEffect } from 'react';
 import { Reservation, ReservationDay, ReservationType } from './types';
-import { HOUSE_POLICIES, PIX_KEY } from './constants';
+import { HOUSE_POLICIES, PIX_KEY, CAMAROTES_LEFT, CAMAROTES_RIGHT, CAMAROTES_BOTTOM, MESAS_CENTER } from './constants';
 import LoungeMap from './components/LoungeMap';
+import ConciergeChat from './components/ConciergeChat';
 import { supabase } from './services/supabase';
 
 const ADMIN_USER = "BLACK";
 const ADMIN_PASSWORD = "black979@@#";
+const LOCK_TIME_MS = 15 * 60 * 1000; // 15 minutos
 
 const App: React.FC = () => {
   const [view, setView] = useState<'client' | 'admin_login' | 'admin_panel'>('client');
+  const [adminTab, setAdminTab] = useState<'config' | 'reports'>('config');
   const [loginForm, setLoginForm] = useState({ user: '', pass: '' });
   const [currentDay, setCurrentDay] = useState<ReservationDay | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -17,8 +20,12 @@ const App: React.FC = () => {
   const [prices, setPrices] = useState<Record<string, number>>({});
   const [pendingPrices, setPendingPrices] = useState<Record<string, number>>({});
   const [flyers, setFlyers] = useState<Record<string, string>>({});
+  const [pendingFlyer, setPendingFlyer] = useState<string | null>(null);
+  const [updateLogs, setUpdateLogs] = useState<{ prices?: string; flyers?: string }>({});
+  
   const [isLoading, setIsLoading] = useState(true);
   const [isSavingPrices, setIsSavingPrices] = useState(false);
+  const [isSavingFlyer, setIsSavingFlyer] = useState(false);
 
   const [showForm, setShowForm] = useState(false);
   const [showPayment, setShowPayment] = useState(false);
@@ -29,12 +36,24 @@ const App: React.FC = () => {
 
   const [formData, setFormData] = useState({
     name: '',
-    birth: '',
-    cpf: '',
     phone: '',
     guests: '',
     age: ''
   });
+
+  const getAllItemIds = (day: ReservationDay) => {
+    const camarotes = [...CAMAROTES_LEFT, ...CAMAROTES_RIGHT, ...CAMAROTES_BOTTOM].sort().map(num => ({
+      id: `${day}|${ReservationType.VIP_BOOTH}|${num}`,
+      type: ReservationType.VIP_BOOTH,
+      num
+    }));
+    const mesas = MESAS_CENTER.flat().sort().map(num => ({
+      id: `${day}|${ReservationType.TABLE_BISTRO}|${num}`,
+      type: ReservationType.TABLE_BISTRO,
+      num
+    }));
+    return { camarotes, mesas };
+  };
 
   useEffect(() => {
     const init = async () => {
@@ -50,14 +69,17 @@ const App: React.FC = () => {
       if (configData) {
         const p = configData.find(c => c.key === 'prices');
         const f = configData.find(c => c.key === 'flyers');
+        const u = configData.find(c => c.key === 'update_logs');
         if (p) {
           setPrices(p.value || {});
           setPendingPrices(p.value || {});
         }
         if (f) setFlyers(f.value || {});
+        if (u) setUpdateLogs(u.value || {});
       }
 
-      supabase.channel('res-stream')
+      // Realtime Subscriptions
+      supabase.channel('public:reservations')
         .on('postgres_changes', { event: '*', schema: 'public', table: 'reservations' }, payload => {
           if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
             setReservations(prev => [...prev.filter(r => r.id !== payload.new.id), payload.new as Reservation]);
@@ -66,7 +88,7 @@ const App: React.FC = () => {
           }
         }).subscribe();
 
-      supabase.channel('config-stream')
+      supabase.channel('public:app_config')
         .on('postgres_changes', { event: '*', schema: 'public', table: 'app_config' }, payload => {
           const newData = payload.new as { key: string, value: any };
           if (newData.key === 'prices') {
@@ -74,72 +96,97 @@ const App: React.FC = () => {
             setPendingPrices(newData.value);
           }
           if (newData.key === 'flyers') setFlyers(newData.value);
+          if (newData.key === 'update_logs') setUpdateLogs(newData.value);
         }).subscribe();
 
       setIsLoading(false);
     };
 
     init();
-    
-    if (localStorage.getItem('bn_admin_auth') === 'true') {
-      setView('admin_panel');
-    }
+    if (localStorage.getItem('bn_admin_auth') === 'true') setView('admin_panel');
   }, []);
 
   const handleAdminLogin = (e: React.FormEvent) => {
     e.preventDefault();
-    // Comparação robusta: usuário ignorando caixa e senha exata
     if (loginForm.user.trim().toUpperCase() === ADMIN_USER && loginForm.pass === ADMIN_PASSWORD) {
       localStorage.setItem('bn_admin_auth', 'true');
       setView('admin_panel');
       setLoginForm({ user: '', pass: '' });
     } else {
-      alert("USUÁRIO OU SENHA INCORRETOS. VERIFIQUE SEUS DADOS.");
+      alert("ACESSO NEGADO.");
     }
   };
 
-  const logoutAdmin = () => {
-    localStorage.removeItem('bn_admin_auth');
-    setView('client');
-  };
-
-  const fileToBase64 = (file: File): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.readAsDataURL(file);
-      reader.onload = () => resolve(reader.result as string);
-      reader.onerror = (error) => reject(error);
-    });
-  };
-
-  const toggleBlockStatus = async (id: string) => {
-    const existing = reservations.find(r => r.id === id);
+  const handleSelectSpot = async (id: string) => {
+    if (!supabase) return;
+    const { data: existing } = await supabase.from('reservations').select('*').eq('id', id).single();
+    const now = Date.now();
     if (existing) {
-      const newStatus = existing.status === 'blocked' ? 'available' : 'blocked';
-      if (newStatus === 'available') {
-        await supabase?.from('reservations').delete().eq('id', id);
-        setReservations(prev => prev.filter(r => r.id !== id));
-      } else {
-        const updated = { ...existing, status: 'blocked' as const };
-        await supabase?.from('reservations').upsert(updated);
+      if (existing.status === 'reserved' || existing.status === 'blocked') {
+        alert("ESTE LUGAR ACABOU DE SER RESERVADO OU BLOQUEADO.");
+        return;
       }
+      if (existing.status === 'pending' && existing.expires_at > now) {
+        alert("ALGUÉM ESTÁ TENTANDO RESERVAR ESTE LUGAR AGORA.");
+        return;
+      }
+    }
+
+    const parts = id.split('|');
+    const lock: Reservation = {
+      id,
+      day: parts[0] as ReservationDay,
+      type: parts[1] as ReservationType,
+      number: parts[2],
+      status: 'pending',
+      price: prices[id] || (parts[1] === ReservationType.VIP_BOOTH ? 1500 : 400),
+      expires_at: now + LOCK_TIME_MS
+    };
+
+    const { error } = await supabase.from('reservations').upsert(lock);
+    if (!error) {
+      setSelectedId(id);
+      setReceiptFile(null);
+      setShowForm(true);
+    }
+  };
+
+  const toggleLock = async (id: string, type: ReservationType, num: string) => {
+    if (!supabase || !currentDay) return;
+    const res = reservations.find(r => r.id === id);
+    
+    if (res?.status === 'blocked') {
+      await supabase.from('reservations').delete().eq('id', id);
     } else {
-      const parts = id.split('|');
-      const newBlock = { id, day: parts[0], type: parts[1], number: parts[2], status: 'blocked', price: prices[id] || 0 };
-      await supabase?.from('reservations').upsert(newBlock);
+      if (res?.status !== 'reserved') {
+        await supabase.from('reservations').upsert({
+          id,
+          day: currentDay,
+          type,
+          number: num,
+          status: 'blocked',
+          price: pendingPrices[id] || 0
+        });
+      } else {
+        alert("NÃO É POSSÍVEL BLOQUEAR UM LOCAL JÁ RESERVADO POR CLIENTE.");
+      }
     }
   };
 
   const handlePriceChange = (id: string, value: string) => {
-    setPendingPrices(prev => ({ ...prev, [id]: parseFloat(value) || 0 }));
+    setPendingPrices(prev => ({ ...prev, [id]: parseInt(value) || 0 }));
   };
 
   const saveAllPrices = async () => {
     setIsSavingPrices(true);
+    const now = new Date().toLocaleString('pt-BR');
+    const newLogs = { ...updateLogs, prices: now };
     try {
       await supabase?.from('app_config').upsert({ key: 'prices', value: pendingPrices });
+      await supabase?.from('app_config').upsert({ key: 'update_logs', value: newLogs });
       setPrices(pendingPrices);
-      alert("CONFIGURAÇÕES SALVAS COM SUCESSO!");
+      setUpdateLogs(newLogs);
+      alert("VALORES ATUALIZADOS COM SUCESSO!");
     } catch (err) {
       alert("ERRO AO SALVAR PREÇOS.");
     } finally {
@@ -147,89 +194,85 @@ const App: React.FC = () => {
     }
   };
 
-  const handleFlyerUpload = async (day: ReservationDay, file: File) => {
-    const base64 = await fileToBase64(file);
-    const newFlyers = { ...flyers, [day]: base64 };
-    setFlyers(newFlyers);
-    await supabase?.from('app_config').upsert({ key: 'flyers', value: newFlyers });
+  const handleFlyerPreview = (day: ReservationDay, file: File) => {
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = () => {
+      setPendingFlyer(reader.result as string);
+    };
+  };
+
+  const saveFlyer = async () => {
+    if (!currentDay || !pendingFlyer) return;
+    setIsSavingFlyer(true);
+    const now = new Date().toLocaleString('pt-BR');
+    const newLogs = { ...updateLogs, flyers: now };
+    const newFlyers = { ...flyers, [currentDay]: pendingFlyer };
+    try {
+      await supabase?.from('app_config').upsert({ key: 'flyers', value: newFlyers });
+      await supabase?.from('app_config').upsert({ key: 'update_logs', value: newLogs });
+      setFlyers(newFlyers);
+      setUpdateLogs(newLogs);
+      setPendingFlyer(null);
+      alert("FLYER SALVO COM SUCESSO!");
+    } catch (err) {
+      alert("ERRO AO SALVAR FLYER.");
+    } finally {
+      setIsSavingFlyer(false);
+    }
   };
 
   const handlePaymentFinish = async () => {
-    if (!selectedId || !currentDay) return;
-    const receiptBase64 = receiptFile ? await fileToBase64(receiptFile) : '';
+    if (!selectedId || !currentDay || !supabase || !receiptFile) return;
     const parts = selectedId.split('|');
     const finalPrice = prices[selectedId] || (parts[1] === ReservationType.VIP_BOOTH ? 1500 : 400);
 
-    const newRes: Reservation = {
-      id: selectedId,
-      day: currentDay,
-      type: parts[1] as ReservationType,
-      number: parts[2],
-      status: 'reserved',
-      price: finalPrice,
-      customer: {
-        fullName: formData.name.toUpperCase(),
-        birthDate: formData.birth,
-        cpf: formData.cpf,
-        phone: formData.phone,
-        guests: formData.guests.split('\n').filter(g => g.trim() !== '').map(g => g.toUpperCase()),
-        timestamp: Date.now(),
-        receipt: receiptBase64,
-        age: formData.age
-      }
+    const reader = new FileReader();
+    reader.readAsDataURL(receiptFile);
+    reader.onload = async () => {
+      const receiptBase64 = reader.result as string;
+      const newRes: Reservation = {
+        id: selectedId,
+        day: currentDay,
+        type: parts[1] as ReservationType,
+        number: parts[2],
+        status: 'reserved',
+        price: finalPrice,
+        customer: {
+          fullName: formData.name.toUpperCase(),
+          birthDate: '',
+          cpf: '',
+          phone: formData.phone,
+          guests: formData.guests.split('\n').filter(g => g.trim() !== '').map(g => g.toUpperCase()),
+          timestamp: Date.now(),
+          age: formData.age,
+          receipt: receiptBase64
+        }
+      };
+      await supabase.from('reservations').upsert(newRes);
+      setShowPayment(false);
+      setShowSuccess(true);
     };
-
-    await supabase?.from('reservations').upsert(newRes);
-    setShowPayment(false);
-    setShowSuccess(true);
   };
 
-  if (isLoading) {
-    return (
-      <div className="min-h-screen bg-[#050505] flex flex-col items-center justify-center">
-        <div className="w-20 h-20 border-[6px] border-gold-500 border-t-transparent rounded-full animate-spin mb-6"></div>
-        <p className="gold-text font-black tracking-[0.5em] text-xs">BLACK NIGHT EXPERIENCE</p>
-      </div>
-    );
-  }
+  if (isLoading) return <div className="min-h-screen bg-black flex flex-col items-center justify-center gold-text font-black animate-pulse"><div className="w-12 h-12 border-4 border-gold-500 border-t-transparent rounded-full animate-spin mb-6"></div>BLACK NIGHT</div>;
 
   if (view === 'admin_login') {
     return (
       <div className="min-h-screen bg-[#050505] flex items-center justify-center p-6">
-        <div className="glass-card max-w-lg w-full p-16 rounded-[4rem] text-center space-y-10 animate-scale-up border-white/10 shadow-[0_0_100px_rgba(212,175,55,0.05)]">
+        <div className="glass-card max-w-lg w-full p-16 rounded-[4rem] text-center space-y-10 animate-scale-up border-gold-500/30">
           <div className="w-24 h-24 bg-gold-500/10 rounded-full flex items-center justify-center mx-auto ring-2 ring-gold-500/20">
             <i className="fas fa-crown text-gold-500 text-4xl"></i>
           </div>
           <div>
-            <h2 className="text-4xl font-serif gold-text font-black tracking-tight">BLACK ADMIN</h2>
-            <p className="text-[11px] text-zinc-500 font-bold tracking-[0.3em] mt-3 uppercase opacity-60">ACESSO EXCLUSIVO À GESTÃO</p>
+            <h2 className="text-4xl font-serif gold-text font-black">ACESSO RESTRITO</h2>
+            <p className="text-[10px] text-zinc-500 font-bold tracking-[0.4em] mt-2">BLACK ADMIN PANEL</p>
           </div>
-          <form onSubmit={handleAdminLogin} className="space-y-6 text-left">
-            <div className="space-y-3">
-               <label className="text-[10px] font-black text-zinc-500 ml-6 tracking-[0.3em]">USUÁRIO</label>
-               <input 
-                autoFocus
-                type="text" 
-                placeholder="DIGITE BLACK" 
-                value={loginForm.user}
-                onChange={e => setLoginForm({...loginForm, user: e.target.value})}
-                className="w-full bg-black/60 border-2 border-zinc-800 rounded-3xl px-8 py-5 font-black focus:border-gold-500 outline-none transition-all uppercase text-base placeholder:text-zinc-800"
-              />
-            </div>
-            <div className="space-y-3">
-               <label className="text-[10px] font-black text-zinc-500 ml-6 tracking-[0.3em]">SENHA</label>
-               <input 
-                type="password" 
-                placeholder="••••••••" 
-                value={loginForm.pass}
-                onChange={e => setLoginForm({...loginForm, pass: e.target.value})}
-                className="w-full bg-black/60 border-2 border-zinc-800 rounded-3xl px-8 py-5 font-black focus:border-gold-500 outline-none transition-all text-base placeholder:text-zinc-800"
-              />
-            </div>
-            <button className="w-full py-6 gold-gradient text-black font-black rounded-3xl shadow-2xl hover:scale-[1.03] active:scale-95 transition-all mt-6 text-lg tracking-widest">
-              ACESSAR PAINEL
-            </button>
-            <button type="button" onClick={() => setView('client')} className="w-full text-[11px] text-zinc-700 font-black hover:text-zinc-500 mt-4 transition-colors">CANCELAR ACESSO</button>
+          <form onSubmit={handleAdminLogin} className="space-y-6">
+            <input type="text" placeholder="USUÁRIO" value={loginForm.user} onChange={e => setLoginForm({...loginForm, user: e.target.value})} className="w-full bg-black/60 border-2 border-zinc-800 rounded-3xl px-8 py-5 font-black focus:border-gold-500 outline-none uppercase text-white" />
+            <input type="password" placeholder="SENHA" value={loginForm.pass} onChange={e => setLoginForm({...loginForm, pass: e.target.value})} className="w-full bg-black/60 border-2 border-zinc-800 rounded-3xl px-8 py-5 font-black focus:border-gold-500 outline-none text-white" />
+            <button className="w-full py-6 gold-gradient text-black font-black rounded-3xl shadow-2xl text-lg hover:scale-[1.02] transition-transform">ENTRAR NO SISTEMA</button>
+            <button type="button" onClick={() => setView('client')} className="text-zinc-600 font-black text-[10px] tracking-widest uppercase hover:text-white transition-colors">VOLTAR AO SITE</button>
           </form>
         </div>
       </div>
@@ -237,161 +280,207 @@ const App: React.FC = () => {
   }
 
   if (view === 'admin_panel') {
+    const { camarotes, mesas } = currentDay ? getAllItemIds(currentDay) : { camarotes: [], mesas: [] };
+    const reservedList = reservations.filter(r => r.status === 'reserved');
+    const totalRevenue = reservedList.reduce((acc, curr) => acc + (curr.price || 0), 0);
+
     return (
-      <div className="min-h-screen bg-[#050505] text-white p-6 md:p-16 uppercase tracking-tight">
-        <header className="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center mb-16 gap-8 border-b border-white/5 pb-10">
-          <div className="text-center md:text-left">
-            <div className="flex items-center gap-4 justify-center md:justify-start mb-2">
-              <i className="fas fa-crown text-gold-500 text-3xl"></i>
-              <h1 className="text-5xl font-serif gold-text font-black">ADMIN DASHBOARD</h1>
-            </div>
-            <p className="text-[11px] text-zinc-500 font-bold tracking-[0.4em] uppercase">CONTROLE MASTER DE RESERVAS E VALORES</p>
+      <div className="min-h-screen bg-[#050505] text-white p-6 md:p-12 uppercase">
+        <header className="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center mb-12 border-b border-white/5 pb-8 gap-8">
+          <div>
+            <h1 className="text-5xl font-serif gold-text font-black tracking-tight">ADMIN MASTER</h1>
+            <p className="text-[10px] text-zinc-500 font-bold tracking-[0.4em]">CONTROLE TOTAL BLACK NIGHT</p>
           </div>
-          <button onClick={logoutAdmin} className="w-full md:w-auto px-10 py-5 bg-red-600/10 text-red-500 border-2 border-red-600/20 rounded-2xl text-[12px] font-black hover:bg-red-600 hover:text-white transition-all shadow-xl active:scale-95">DESCONECTAR</button>
+          
+          <div className="flex bg-zinc-900/50 p-2 rounded-2xl border border-white/5">
+            <button onClick={() => setAdminTab('config')} className={`px-8 py-4 rounded-xl text-[10px] font-black transition-all ${adminTab === 'config' ? 'gold-gradient text-black shadow-lg shadow-gold-500/20' : 'text-zinc-500 hover:text-white'}`}>MAPA & PREÇOS</button>
+            <button onClick={() => setAdminTab('reports')} className={`px-8 py-4 rounded-xl text-[10px] font-black transition-all ${adminTab === 'reports' ? 'gold-gradient text-black shadow-lg shadow-gold-500/20' : 'text-zinc-500 hover:text-white'}`}>RELATÓRIO MASTER</button>
+          </div>
+
+          <button onClick={() => { localStorage.removeItem('bn_admin_auth'); setView('client'); }} className="px-10 py-4 bg-red-600/10 text-red-500 border border-red-600/20 rounded-xl font-black text-xs hover:bg-red-600 hover:text-white transition-all">SAIR</button>
         </header>
 
-        <main className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-12 gap-12 pb-32">
-          {/* COLUNA ESQUERDA: RESERVAS */}
-          <div className="lg:col-span-7 space-y-10">
-            <div className="flex gap-6">
-              {(['Sexta', 'Sábado'] as ReservationDay[]).map(d => (
-                <button key={d} onClick={() => setCurrentDay(d)} className={`flex-1 py-7 rounded-[2rem] text-[14px] font-black transition-all shadow-2xl active:scale-95 ${currentDay === d ? 'gold-gradient text-black' : 'bg-zinc-900/50 text-zinc-600 border border-zinc-800 hover:text-zinc-400'}`}>
-                  {d}
-                </button>
-              ))}
-            </div>
-
-            {currentDay ? (
-              <div className="space-y-6">
-                <div className="flex justify-between items-center mb-8 px-4">
-                  <h3 className="text-sm font-black text-gold-500 tracking-[0.3em]">RESERVAS DO DIA</h3>
-                  <span className="text-[10px] bg-zinc-900 px-4 py-2 rounded-full text-zinc-500 font-black">TOTAL: {reservations.filter(r => r.day === currentDay && r.status === 'reserved').length}</span>
+        <main className="max-w-7xl mx-auto">
+          {adminTab === 'config' ? (
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-12">
+              <div className="lg:col-span-7 space-y-10">
+                <div className="flex gap-4">
+                  {(['Sexta', 'Sábado'] as ReservationDay[]).map(d => (
+                    <button key={d} onClick={() => { setCurrentDay(d); setPendingFlyer(null); }} className={`flex-1 py-8 rounded-[2rem] font-black text-sm transition-all shadow-2xl ${currentDay === d ? 'gold-gradient text-black scale-[1.02]' : 'bg-zinc-900 text-zinc-600 border border-zinc-800'}`}>{d}</button>
+                  ))}
                 </div>
-                
-                {reservations.filter(r => r.day === currentDay && r.status === 'reserved').length === 0 ? (
-                  <div className="p-32 text-center glass-card rounded-[3rem] text-zinc-800 font-black border-dashed border-2 border-white/5 text-xl tracking-widest">
-                    LISTA VAZIA
-                  </div>
-                ) : (
-                  reservations.filter(r => r.day === currentDay && r.status === 'reserved').map(res => (
-                    <div key={res.id} className="glass-card p-8 rounded-[2.5rem] border-l-[10px] border-gold-500 flex flex-col md:flex-row justify-between items-center gap-6 animate-fade-in shadow-2xl">
-                      <div className="text-center md:text-left flex-1">
-                        <div className="flex items-center gap-3 mb-3 justify-center md:justify-start">
-                           <span className="text-[11px] bg-gold-500 text-black px-4 py-1.5 rounded-full font-black uppercase tracking-widest">{res.type} #{res.number}</span>
-                           <span className="text-[10px] text-zinc-600 font-black">{new Date(res.customer?.timestamp || 0).toLocaleTimeString()}</span>
-                        </div>
-                        <h4 className="text-2xl font-black mb-1 text-white">{res.customer?.fullName}</h4>
-                        <div className="flex flex-wrap gap-4 justify-center md:justify-start mt-2">
-                           <p className="text-[11px] text-zinc-500 font-bold"><i className="fab fa-whatsapp text-green-600 mr-2"></i>{res.customer?.phone}</p>
-                           <p className="text-[11px] text-zinc-500 font-bold"><i className="fas fa-users text-gold-500 mr-2"></i>{res.customer?.guests.length} CONVIDADOS</p>
-                        </div>
-                      </div>
-                      <div className="flex gap-4 w-full md:w-auto">
-                        {res.customer?.receipt && (
-                          <button onClick={() => setViewingReceipt(res.customer?.receipt || null)} className="flex-1 md:flex-none w-16 h-16 bg-white/5 rounded-2xl hover:bg-gold-500/20 text-gold-500 transition-all border border-white/5 text-xl"><i className="fas fa-file-invoice"></i></button>
-                        )}
-                        <button onClick={async () => { if(confirm("DESEJA REALMENTE LIBERAR ESTE LOCAL?")) await supabase?.from('reservations').delete().eq('id', res.id); }} className="flex-1 md:flex-none w-16 h-16 bg-red-600/10 text-red-500 rounded-2xl hover:bg-red-600 hover:text-white transition-all border border-red-600/10 text-xl"><i className="fas fa-trash"></i></button>
+
+                {currentDay ? (
+                  <div className="glass-card p-10 rounded-[3.5rem] border-zinc-800 shadow-2xl relative overflow-hidden">
+                    <div className="flex justify-between items-center mb-10 border-b border-white/5 pb-6">
+                      <h3 className="text-sm font-black text-gold-500 tracking-[0.3em]">VALORES E TRAVAS ({currentDay})</h3>
+                      <div className="text-right">
+                        <p className="text-[8px] text-zinc-600 font-bold mb-1 tracking-widest">ÚLTIMA ATUALIZAÇÃO</p>
+                        <p className="text-xs text-zinc-300 font-black tracking-tighter">{updateLogs.prices || '--/--/----'}</p>
                       </div>
                     </div>
-                  ))
-                )}
+                    
+                    <div className="space-y-4 max-h-[700px] overflow-y-auto custom-scrollbar pr-4">
+                      {[...camarotes, ...mesas].map(({ id, num, type }) => {
+                        const res = reservations.find(r => r.id === id);
+                        const isBlocked = res?.status === 'blocked';
+                        const isRes = res?.status === 'reserved';
+                        return (
+                          <div key={id} className={`flex items-center justify-between p-6 rounded-3xl border-2 transition-all ${isRes ? 'bg-gold-500/5 border-gold-500/20' : 'bg-black/40 border-white/5 hover:border-zinc-800'}`}>
+                            <div className="flex flex-col">
+                              <span className="text-[10px] text-zinc-500 font-black mb-1">{type.toUpperCase()}</span>
+                              <span className="text-2xl font-black text-white">{num} {isRes && '💎'}</span>
+                            </div>
+                            <div className="flex items-center gap-6">
+                              <div className="relative">
+                                <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gold-500/50 font-black text-xs">R$</span>
+                                <input 
+                                  type="number" 
+                                  value={pendingPrices[id] || ''} 
+                                  onChange={e => handlePriceChange(id, e.target.value)} 
+                                  className="w-36 bg-black border-2 border-zinc-800 rounded-2xl pl-10 pr-4 py-4 text-base text-gold-500 font-black focus:border-gold-500 outline-none shadow-inner text-white" 
+                                  placeholder="0" 
+                                />
+                              </div>
+                              <button 
+                                onClick={() => toggleLock(id, type, num)}
+                                disabled={isRes}
+                                className={`w-20 h-20 rounded-2xl flex items-center justify-center text-3xl transition-all shadow-xl border-2 ${isBlocked ? 'bg-red-600 text-white border-red-500' : 'bg-zinc-900 text-zinc-600 border-zinc-800 hover:text-white disabled:opacity-20'}`}
+                              >
+                                <i className={`fas fa-${isBlocked ? 'lock' : 'unlock'}`}></i>
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <button onClick={saveAllPrices} disabled={isSavingPrices} className="w-full mt-10 py-8 gold-gradient text-black font-black rounded-3xl shadow-2xl flex items-center justify-center gap-4 text-xl hover:scale-[1.02] transition-transform">
+                      {isSavingPrices ? <i className="fas fa-spinner animate-spin"></i> : <><i className="fas fa-save"></i> SALVAR PREÇOS NO SISTEMA</>}
+                    </button>
+                  </div>
+                ) : <div className="p-32 text-center text-zinc-900 font-black text-3xl select-none animate-pulse">ESCOLHA UM DIA PARA CONFIGURAR</div>}
               </div>
-            ) : <div className="p-40 text-center text-zinc-900 font-black text-3xl opacity-20 select-none">SELECIONE O DIA</div>}
-          </div>
 
-          {/* COLUNA DIREITA: CONFIGS */}
-          <div className="lg:col-span-5 space-y-10">
-            {/* GESTÃO DE VALORES COM BOTÃO SALVAR */}
-            <section className="glass-card p-10 rounded-[3.5rem] border-zinc-800 shadow-2xl relative">
-              <div className="flex justify-between items-center mb-8 border-b border-white/5 pb-6">
-                <h3 className="text-xs font-black text-gold-500 tracking-[0.3em]">CONFIGURAR VALORES</h3>
-                <i className="fas fa-coins text-zinc-800 text-xl"></i>
-              </div>
-
-              <div className="space-y-4 max-h-[500px] overflow-y-auto custom-scrollbar pr-4">
-                {currentDay && [...Array(10)].map((_, i) => {
-                  const num = (i+1).toString().padStart(2, '0');
-                  const id = `${currentDay}|${ReservationType.VIP_BOOTH}|${num}`;
-                  const isModified = pendingPrices[id] !== prices[id];
-                  
-                  return (
-                    <div key={id} className={`flex items-center justify-between gap-6 py-4 px-6 rounded-2xl border transition-all ${isModified ? 'border-gold-500/50 bg-gold-500/5' : 'border-white/5 bg-black/20'}`}>
-                      <div className="flex flex-col">
-                        <span className="text-[10px] font-black text-zinc-500 mb-1">CAMAROTE</span>
-                        <span className="text-xl font-black text-white">{num}</span>
+              <div className="lg:col-span-5 space-y-10">
+                <section className="glass-card p-10 rounded-[3.5rem] border-zinc-800 shadow-2xl">
+                  <div className="flex justify-between items-center mb-8">
+                    <h3 className="text-xs font-black text-gold-500 tracking-[0.3em]">FLYER DE DIVULGAÇÃO</h3>
+                    <div className="text-right">
+                      <p className="text-[8px] text-zinc-600 font-bold mb-1 tracking-widest">ÚLTIMA TROCA</p>
+                      <p className="text-xs text-zinc-300 font-black tracking-tighter">{updateLogs.flyers || '--/--/----'}</p>
+                    </div>
+                  </div>
+                  {currentDay && (
+                    <div className="space-y-8">
+                      <div className="aspect-[3/4] bg-zinc-900 rounded-[2.5rem] overflow-hidden border-4 border-zinc-800 flex items-center justify-center relative group shadow-2xl">
+                        {pendingFlyer || flyers[currentDay] ? (
+                          <img src={pendingFlyer || flyers[currentDay]} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-700" />
+                        ) : (
+                          <i className="fas fa-image text-zinc-800 text-7xl"></i>
+                        )}
+                        {pendingFlyer && <div className="absolute top-6 right-6 bg-gold-500 text-black px-5 py-2 rounded-full text-[10px] font-black animate-bounce shadow-2xl">NOVA PRÉVIA</div>}
                       </div>
                       
-                      <div className="flex items-center gap-3">
-                        <div className="relative">
-                          <span className="absolute left-4 top-1/2 -translate-y-1/2 text-[10px] text-zinc-700 font-black">R$</span>
-                          <input 
-                            type="number" 
-                            value={pendingPrices[id] ?? ""} 
-                            onChange={(e) => handlePriceChange(id, e.target.value)} 
-                            placeholder="1500" 
-                            className="bg-black border-2 border-zinc-800 rounded-xl pl-10 pr-4 py-3 text-sm w-32 text-gold-500 font-black outline-none focus:border-gold-500 transition-all text-center" 
-                          />
-                        </div>
-                        <button onClick={() => toggleBlockStatus(id)} className={`w-14 h-14 rounded-xl text-[10px] font-black transition-all shadow-lg flex items-center justify-center ${reservations.find(r => r.id === id)?.status === 'blocked' ? 'bg-red-600 text-white' : 'bg-zinc-800 text-zinc-600 hover:text-white'}`}>
-                          <i className={`fas ${reservations.find(r => r.id === id)?.status === 'blocked' ? 'fa-lock' : 'fa-unlock'}`}></i>
-                        </button>
+                      <div className="grid grid-cols-1 gap-4">
+                        <label className="block w-full py-6 bg-zinc-800 text-zinc-300 text-center rounded-2xl cursor-pointer font-black text-[11px] border-2 border-zinc-700 hover:bg-zinc-700 transition-all uppercase tracking-widest">
+                          <i className="fas fa-folder-open mr-3"></i> SELECIONAR NOVO FLYER
+                          <input type="file" className="hidden" accept="image/*" onChange={e => e.target.files?.[0] && handleFlyerPreview(currentDay!, e.target.files[0])} />
+                        </label>
+                        {pendingFlyer && (
+                          <button onClick={saveFlyer} disabled={isSavingFlyer} className="w-full py-6 gold-gradient text-black font-black rounded-2xl shadow-2xl flex items-center justify-center gap-3 text-sm hover:scale-[1.02] transition-transform">
+                            {isSavingFlyer ? <i className="fas fa-spinner animate-spin"></i> : <><i className="fas fa-check-circle"></i> ATUALIZAR FLYER NO SITE AGORA</>}
+                          </button>
+                        )}
                       </div>
                     </div>
-                  );
-                })}
+                  )}
+                </section>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-10 animate-fade-in">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+                <div className="glass-card p-12 rounded-[3rem] border-gold-500/20 shadow-2xl relative overflow-hidden">
+                  <div className="absolute top-0 right-0 w-32 h-32 bg-gold-500/5 rounded-full -mr-16 -mt-16 blur-3xl"></div>
+                  <p className="text-[11px] text-zinc-500 font-black tracking-[0.3em] mb-4">FATURAMENTO TOTAL</p>
+                  <p className="text-6xl font-serif gold-text font-black">R$ {totalRevenue.toLocaleString()}</p>
+                </div>
+                <div className="glass-card p-12 rounded-[3rem] border-white/5 shadow-2xl">
+                  <p className="text-[11px] text-zinc-500 font-black tracking-[0.3em] mb-4">RESERVAS CONFIRMADAS</p>
+                  <p className="text-6xl font-serif text-white font-black">{reservedList.length}</p>
+                </div>
+                <div className="glass-card p-12 rounded-[3rem] border-white/5 shadow-2xl">
+                  <p className="text-[11px] text-zinc-500 font-black tracking-[0.3em] mb-4">PÚBLICO ESTIMADO</p>
+                  <p className="text-6xl font-serif text-white font-black">{reservedList.reduce((acc, curr) => acc + (curr.customer?.guests.length || 0) + 1, 0)}</p>
+                </div>
               </div>
 
-              {currentDay && (
-                <div className="mt-8">
-                  <button 
-                    onClick={saveAllPrices}
-                    disabled={isSavingPrices}
-                    className={`w-full py-6 rounded-2xl font-black tracking-[0.2em] transition-all shadow-2xl flex items-center justify-center gap-4 ${isSavingPrices ? 'bg-zinc-800 text-zinc-600' : 'gold-gradient text-black hover:scale-[1.02] active:scale-95'}`}
-                  >
-                    {isSavingPrices ? (
-                      <i className="fas fa-circle-notch animate-spin"></i>
-                    ) : (
-                      <>
-                        <i className="fas fa-save"></i>
-                        SALVAR CONFIGURAÇÕES DE VALORES
-                      </>
-                    )}
-                  </button>
-                  <p className="text-[9px] text-zinc-600 text-center font-black mt-4 tracking-widest uppercase">AS ALTERAÇÕES SÓ SERÃO APLICADAS AO CLICAR EM SALVAR</p>
-                </div>
-              )}
-            </section>
-
-            {/* FLYER */}
-            <section className="glass-card p-10 rounded-[3.5rem] border-zinc-800 shadow-2xl">
-              <h3 className="text-xs font-black text-gold-500 tracking-[0.3em] mb-8 border-b border-white/5 pb-6">FLYER PUBLICITÁRIO</h3>
-              {currentDay ? (
-                <div className="space-y-6">
-                   <div className="aspect-[3/4] bg-zinc-900 rounded-[2.5rem] overflow-hidden border-2 border-zinc-800 flex items-center justify-center group relative shadow-inner">
-                     {flyers[currentDay] ? (
-                       <img src={flyers[currentDay]} className="w-full h-full object-cover" />
-                     ) : (
-                       <i className="fas fa-image text-5xl text-zinc-800"></i>
-                     )}
-                     <div className="absolute inset-0 bg-black/80 opacity-0 group-hover:opacity-100 transition-all duration-500 flex items-center justify-center p-10 text-center">
-                        <span className="text-xs font-black text-white tracking-[0.2em] leading-relaxed">CLIQUE NO BOTÃO ABAIXO PARA CARREGAR UMA NOVA IMAGEM</span>
-                     </div>
-                   </div>
-                   <label className="block w-full py-6 gold-gradient text-black text-center rounded-[2rem] cursor-pointer transition-all hover:scale-[1.02] active:scale-95 shadow-xl font-black tracking-widest text-sm">
-                     <i className="fas fa-upload mr-3"></i> CARREGAR NOVO FLYER
-                     <input type="file" className="hidden" accept="image/*" onChange={e => { if(e.target.files?.[0]) handleFlyerUpload(currentDay!, e.target.files[0]) }} />
-                   </label>
-                </div>
-              ) : <p className="text-[10px] text-zinc-800 font-black text-center py-20">AGUARDANDO SELEÇÃO DE DIA...</p>}
-            </section>
-          </div>
+              <div className="glass-card rounded-[3.5rem] overflow-hidden border-white/5 shadow-2xl">
+                 <div className="overflow-x-auto">
+                   <table className="w-full text-left border-collapse">
+                      <thead className="bg-zinc-900/90 text-[10px] font-black text-gold-500 tracking-[0.4em] uppercase">
+                         <tr>
+                            <th className="p-10">LOCAL / TIPO</th>
+                            <th className="p-10">CLIENTE / CONTATO</th>
+                            <th className="p-10">DIA / DATA</th>
+                            <th className="p-10">VALOR PAGO</th>
+                            <th className="p-10 text-center">AÇÕES</th>
+                         </tr>
+                      </thead>
+                      <tbody className="text-xs font-bold text-zinc-400">
+                         {reservedList.sort((a,b) => (b.customer?.timestamp || 0) - (a.customer?.timestamp || 0)).map(res => (
+                           <tr key={res.id} className="border-t border-white/5 hover:bg-white/5 transition-colors group">
+                              <td className="p-10">
+                                 <div className="flex flex-col">
+                                    <span className="text-[9px] text-zinc-600 font-black mb-1 tracking-widest">{res.type.toUpperCase()}</span>
+                                    <span className="text-2xl font-black text-white group-hover:gold-text transition-colors">{res.number}</span>
+                                 </div>
+                              </td>
+                              <td className="p-10">
+                                 <div className="flex flex-col gap-1">
+                                    <span className="text-base font-black text-white">{res.customer?.fullName}</span>
+                                    <span className="text-[11px] text-green-500 font-black tracking-tighter flex items-center gap-2">
+                                      <i className="fab fa-whatsapp text-lg"></i>{res.customer?.phone}
+                                    </span>
+                                    <span className="text-[9px] text-zinc-600 mt-1 uppercase">IDADE: {res.customer?.age} ANOS</span>
+                                 </div>
+                              </td>
+                              <td className="p-10">
+                                <div className="flex flex-col">
+                                  <span className="text-sm font-black text-white uppercase">{res.day}</span>
+                                  <span className="text-[9px] text-zinc-600 font-bold uppercase">{new Date(res.customer?.timestamp || 0).toLocaleDateString()}</span>
+                                </div>
+                              </td>
+                              <td className="p-10">
+                                <div className="flex flex-col">
+                                  <span className="text-lg font-black text-gold-500">R$ {res.price}</span>
+                                  <span className="text-[8px] text-zinc-700 font-black uppercase">CONFIRMADO VIA PIX</span>
+                                </div>
+                              </td>
+                              <td className="p-10">
+                                 <div className="flex justify-center gap-4">
+                                    {res.customer?.receipt && (
+                                      <button onClick={() => setViewingReceipt(res.customer?.receipt || null)} className="w-14 h-14 rounded-2xl bg-white/5 flex items-center justify-center text-gold-500 hover:bg-gold-500 hover:text-black transition-all border border-white/10 shadow-lg"><i className="fas fa-file-invoice text-xl"></i></button>
+                                    )}
+                                    <button onClick={async () => { if(confirm("DESEJA REALMENTE REMOVER ESTA RESERVA?")) await supabase?.from('reservations').delete().eq('id', res.id); }} className="w-14 h-14 rounded-2xl bg-red-600/10 text-red-500 flex items-center justify-center hover:bg-red-600 hover:text-white transition-all border border-red-600/10 shadow-lg"><i className="fas fa-trash-alt text-xl"></i></button>
+                                 </div>
+                              </td>
+                           </tr>
+                         ))}
+                      </tbody>
+                   </table>
+                 </div>
+                 {reservedList.length === 0 && <div className="p-32 text-center text-zinc-800 font-black text-2xl select-none uppercase tracking-[0.5em]">NENHUMA VENDA REGISTRADA</div>}
+              </div>
+            </div>
+          )}
         </main>
-
+        
         {viewingReceipt && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-black/98 backdrop-blur-md" onClick={() => setViewingReceipt(null)}>
+          <div className="fixed inset-0 z-[250] bg-black/98 backdrop-blur-3xl flex items-center justify-center p-6" onClick={() => setViewingReceipt(null)}>
             <div className="relative max-w-2xl w-full animate-scale-up" onClick={e => e.stopPropagation()}>
-              <img src={viewingReceipt} className="w-full h-auto rounded-[3rem] shadow-[0_0_100px_rgba(212,175,55,0.2)] border-2 border-white/10" alt="Recibo" />
-              <button onClick={() => setViewingReceipt(null)} className="absolute -top-6 -right-6 w-16 h-16 bg-gold-500 text-black rounded-full flex items-center justify-center shadow-2xl hover:scale-110 transition-transform"><i className="fas fa-times text-2xl"></i></button>
+              <img src={viewingReceipt} className="w-full h-auto rounded-[3.5rem] border-8 border-gold-500 shadow-[0_0_150px_rgba(212,175,55,0.4)]" alt="Comprovante" />
+              <button onClick={() => setViewingReceipt(null)} className="absolute -top-6 -right-6 w-16 h-16 bg-red-600 text-white rounded-full flex items-center justify-center shadow-2xl border-4 border-black"><i className="fas fa-times text-2xl"></i></button>
             </div>
           </div>
         )}
@@ -399,122 +488,132 @@ const App: React.FC = () => {
     );
   }
 
-  // VISTA DO CLIENTE
+  /* VISTA DO CLIENTE */
   return (
-    <div className="min-h-screen bg-[#050505] text-zinc-100 uppercase tracking-tight selection:bg-gold-500 selection:text-black flex flex-col">
-      <header className="py-24 px-6 text-center relative overflow-hidden">
-        <div className="absolute top-0 left-1/2 -translate-x-1/2 w-full h-full bg-[radial-gradient(circle_at_50%_-20%,#d4af3711,transparent_70%)]"></div>
-        <h1 className="text-8xl md:text-[10rem] font-serif gold-text tracking-tighter mb-4 font-black select-none leading-none">BLACK NIGHT</h1>
-        <p className="text-zinc-600 tracking-[1em] text-[11px] font-black opacity-80 mt-6">PREMIUM LOUNGE EXPERIENCE</p>
+    <div className="min-h-screen bg-[#050505] text-white selection:bg-gold-500 selection:text-black">
+      <header className="py-24 text-center relative overflow-hidden">
+        <div className="absolute top-0 left-1/2 -translate-x-1/2 w-full h-full bg-[radial-gradient(circle_at_50%_-20%,#d4af3715,transparent_75%)] opacity-60"></div>
+        <h1 className="text-8xl md:text-[10rem] font-serif gold-text font-black tracking-tighter mb-4 relative z-10 select-none drop-shadow-2xl">BLACK NIGHT</h1>
+        <p className="text-zinc-500 tracking-[1.2em] text-[11px] font-black relative z-10 uppercase opacity-80">PREMIUM LOUNGE EXPERIENCE</p>
       </header>
 
-      <main className="max-w-5xl mx-auto px-6 pb-24 flex-1 w-full">
+      <main className="max-w-7xl mx-auto px-6 pb-40">
         {!currentDay ? (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-12 animate-fade-in">
-            {(['Sexta', 'Sábado'] as ReservationDay[]).map((day) => (
-              <button key={day} onClick={() => setCurrentDay(day)} className="group relative glass-card rounded-[4rem] overflow-hidden transition-all hover:scale-[1.02] h-[650px] border-zinc-900 shadow-2xl">
+            {(['Sexta', 'Sábado'] as ReservationDay[]).map(day => (
+              <button key={day} onClick={() => setCurrentDay(day)} className="group relative glass-card rounded-[5rem] overflow-hidden transition-all hover:scale-[1.03] h-[700px] border-white/5 shadow-[0_40px_100px_rgba(0,0,0,0.6)]">
                 {flyers[day] ? (
                   <img src={flyers[day]} className="absolute inset-0 w-full h-full object-cover opacity-60 group-hover:opacity-100 transition-opacity duration-1000" />
                 ) : (
-                  <div className="absolute inset-0 bg-zinc-900/50 flex items-center justify-center"><i className="fas fa-image text-zinc-800 text-6xl"></i></div>
+                  <div className="absolute inset-0 bg-zinc-900/50 flex items-center justify-center text-zinc-800"><i className="fas fa-image text-7xl"></i></div>
                 )}
-                <div className="absolute inset-0 bg-gradient-to-t from-black via-black/30 to-transparent"></div>
-                <div className="relative z-10 p-16 mt-auto text-left">
-                  <span className="block text-gold-500 text-[11px] font-black mb-4 tracking-[0.5em]">{HOUSE_POLICIES[day].description}</span>
-                  <span className="block text-7xl font-serif text-white group-hover:gold-text transition-colors font-black tracking-tighter">{day}</span>
+                <div className="absolute inset-0 bg-gradient-to-t from-black via-black/40 to-transparent"></div>
+                <div className="relative z-10 p-20 mt-auto text-left">
+                  <span className="block text-gold-500 text-[11px] font-black mb-4 tracking-[0.5em] uppercase">{HOUSE_POLICIES[day].description}</span>
+                  <span className="block text-8xl font-serif text-white group-hover:gold-text transition-colors font-black tracking-tighter uppercase">{day}</span>
                 </div>
               </button>
             ))}
           </div>
         ) : (
           <div className="space-y-12 animate-fade-in">
-            <div className="flex justify-between items-end border-b border-white/5 pb-12">
+            <div className="flex justify-between items-end border-b border-white/5 pb-10">
               <div>
-                <button onClick={() => setCurrentDay(null)} className="text-[11px] text-gold-500 font-black flex items-center gap-3 mb-4 hover:underline tracking-widest"><i className="fas fa-arrow-left text-[9px]"></i> VOLTAR AO INÍCIO</button>
-                <h2 className="text-7xl font-serif text-white font-black tracking-tighter">{currentDay}</h2>
-              </div>
-              <div className="text-right hidden md:block">
-                <p className="text-[11px] text-zinc-500 font-black tracking-[0.4em] mb-2 uppercase">MAPA DE ACESSO</p>
-                <p className="text-gold-500 text-sm font-black tracking-widest uppercase">SELECIONE SEU CAMAROTE</p>
+                <button onClick={() => setCurrentDay(null)} className="text-[11px] text-gold-500 font-black flex items-center gap-3 mb-4 tracking-[0.3em] uppercase group"><i className="fas fa-arrow-left group-hover:-translate-x-1 transition-transform"></i> VOLTAR PARA SELEÇÃO</button>
+                <h2 className="text-7xl font-serif font-black tracking-tighter uppercase">{currentDay}</h2>
               </div>
             </div>
-            <LoungeMap reservations={reservations} onSelect={(id) => { setSelectedId(id); setShowForm(true); }} selectedId={selectedId} day={currentDay} prices={prices} />
+            <LoungeMap reservations={reservations} onSelect={handleSelectSpot} selectedId={selectedId} day={currentDay} prices={prices} />
           </div>
         )}
       </main>
 
-      <footer className="py-16 px-6 border-t border-white/5 text-center bg-black/50 backdrop-blur-md">
-         <p className="text-[9px] text-zinc-800 font-black tracking-[0.8em] mb-6 uppercase">© BLACK NIGHT LOUNGE - TODOS OS DIREITOS RESERVADOS</p>
-         <button 
-           onClick={() => setView('admin_login')} 
-           className="w-12 h-12 inline-flex items-center justify-center text-zinc-600 hover:text-gold-500 transition-all duration-700 rounded-full hover:bg-white/5"
-           title="Acesso Administrador"
-         >
-            <i className="fas fa-lock text-[16px] opacity-40 hover:opacity-100"></i>
-         </button>
+      <footer className="py-24 border-t border-white/5 text-center bg-black/60 backdrop-blur-2xl relative mt-20">
+         <div className="max-w-4xl mx-auto space-y-12">
+            <div className="flex justify-center gap-12 opacity-30">
+              <i className="fab fa-instagram text-3xl"></i>
+              <i className="fab fa-facebook text-3xl"></i>
+              <i className="fab fa-whatsapp text-3xl"></i>
+            </div>
+            <p className="text-[11px] text-zinc-800 font-black tracking-[0.8em] uppercase">© BLACK NIGHT LOUNGE - RESERVAS EXCLUSIVAS</p>
+            
+            <button 
+              onClick={() => setView('admin_login')} 
+              className="w-32 h-32 bg-zinc-900/30 text-zinc-800 hover:text-gold-500 transition-all duration-700 rounded-full flex items-center justify-center mx-auto border-2 border-zinc-900/50 hover:border-gold-500 group shadow-2xl hover:shadow-[0_0_80px_rgba(212,175,55,0.15)] mt-10"
+              title="Acesso Admin"
+            >
+              <i className="fas fa-lock text-5xl opacity-20 group-hover:opacity-100 group-hover:scale-110 transition-transform"></i>
+            </button>
+         </div>
       </footer>
 
-      {/* MODAIS DE FLUXO DO CLIENTE */}
       {showForm && (
-        <div className="fixed inset-0 z-[110] flex items-center justify-center p-6 bg-black/95 backdrop-blur-xl">
-          <div className="glass-card w-full max-w-3xl p-16 rounded-[4rem] animate-scale-up border-gold-500/30 shadow-[0_0_100px_rgba(212,175,55,0.1)]">
-            <div className="flex justify-between items-start mb-12">
-              <h2 className="text-5xl font-serif gold-text font-black uppercase leading-[0.8]">RESERVA<br/><span className="text-3xl text-white opacity-30">{selectedId?.split('|').slice(1).join(' #')}</span></h2>
-              <button onClick={() => setShowForm(false)} className="text-zinc-600 hover:text-white transition-colors"><i className="fas fa-times text-2xl"></i></button>
-            </div>
-            <form onSubmit={(e) => { e.preventDefault(); if(parseInt(formData.age) < 18) return alert("ENTRADA PERMITIDA APENAS PARA +18 ANOS."); setShowForm(false); setShowPayment(true); }} className="grid grid-cols-1 md:grid-cols-2 gap-8">
-              <div className="md:col-span-2">
-                <input required type="text" placeholder="NOME COMPLETO" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className="w-full bg-black/50 border-2 border-zinc-900 rounded-3xl px-8 py-6 text-base font-black focus:border-gold-500 outline-none transition-all placeholder:text-zinc-800" />
+        <div className="fixed inset-0 z-[110] flex items-center justify-center p-6 bg-black/96 backdrop-blur-2xl">
+          <div className="glass-card w-full max-w-3xl p-16 rounded-[5rem] animate-scale-up border-gold-500/20 shadow-[0_0_150px_rgba(0,0,0,1)]">
+            <h2 className="text-5xl font-serif gold-text font-black mb-12 uppercase tracking-tight">DADOS DA RESERVA</h2>
+            <form onSubmit={e => { e.preventDefault(); if(parseInt(formData.age) < 18) return alert("ENTRADA PERMITIDA APENAS PARA MAIORES DE 18 ANOS."); setShowForm(false); setShowPayment(true); }} className="space-y-8">
+              <input required type="text" placeholder="NOME COMPLETO DO TITULAR" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className="w-full bg-black/40 border-2 border-zinc-900 rounded-3xl px-10 py-6 text-base font-black focus:border-gold-500 outline-none uppercase tracking-wide text-white" />
+              <div className="grid grid-cols-2 gap-6">
+                <input required type="number" placeholder="IDADE" value={formData.age} onChange={e => setFormData({...formData, age: e.target.value})} className="bg-black/40 border-2 border-zinc-900 rounded-3xl px-10 py-6 text-base font-black focus:border-gold-500 outline-none uppercase tracking-wide text-white" />
+                <input required type="tel" placeholder="WHATSAPP (DDD)" value={formData.phone} onChange={e => setFormData({...formData, phone: e.target.value})} className="bg-black/40 border-2 border-zinc-900 rounded-3xl px-10 py-6 text-base font-black focus:border-gold-500 outline-none uppercase tracking-wide text-white" />
               </div>
-              <input required type="number" placeholder="IDADE" value={formData.age} onChange={e => setFormData({...formData, age: e.target.value})} className="w-full bg-black/50 border-2 border-zinc-900 rounded-3xl px-8 py-6 text-base font-black focus:border-gold-500 outline-none placeholder:text-zinc-800" />
-              <input required type="tel" placeholder="WHATSAPP" value={formData.phone} onChange={e => setFormData({...formData, phone: e.target.value})} className="w-full bg-black/50 border-2 border-zinc-900 rounded-3xl px-8 py-6 text-base font-black focus:border-gold-500 outline-none placeholder:text-zinc-800" />
-              <div className="md:col-span-2">
-                <textarea placeholder="LISTA DE CONVIDADOS (UM POR LINHA)" value={formData.guests} onChange={e => setFormData({...formData, guests: e.target.value})} className="w-full h-40 bg-black/50 border-2 border-zinc-900 rounded-[2rem] px-8 py-6 text-base font-black focus:border-gold-500 outline-none resize-none placeholder:text-zinc-800"></textarea>
-              </div>
-              <div className="md:col-span-2">
-                <button type="submit" className="w-full py-7 gold-gradient text-black font-black text-xl tracking-[0.3em] rounded-3xl shadow-2xl hover:scale-[1.02] active:scale-95 transition-all uppercase">PRÓXIMO PASSO</button>
-              </div>
+              <textarea placeholder="LISTA DE CONVIDADOS (UM POR LINHA)" value={formData.guests} onChange={e => setFormData({...formData, guests: e.target.value})} className="w-full h-40 bg-black/40 border-2 border-zinc-900 rounded-3xl px-10 py-6 text-base font-black focus:border-gold-500 outline-none resize-none uppercase tracking-wide custom-scrollbar text-white"></textarea>
+              <button type="submit" className="w-full py-8 gold-gradient text-black font-black rounded-[2.5rem] text-xl shadow-2xl uppercase tracking-widest hover:scale-[1.01] transition-transform">IR PARA O PAGAMENTO</button>
+              <button type="button" onClick={() => setShowForm(false)} className="w-full text-zinc-700 font-black text-xs mt-2 tracking-[0.4em] uppercase hover:text-white transition-colors">CANCELAR RESERVA</button>
             </form>
           </div>
         </div>
       )}
 
       {showPayment && (
-        <div className="fixed inset-0 z-[120] flex items-center justify-center p-6 bg-black/98 backdrop-blur-3xl">
-          <div className="glass-card w-full max-w-xl p-16 rounded-[4rem] text-center animate-scale-up border-gold-500 shadow-[0_0_100px_rgba(212,175,55,0.2)]">
-            <h2 className="text-4xl font-serif gold-text font-black mb-10 tracking-tight">PAGAMENTO PIX</h2>
-            <div className="bg-zinc-950 p-10 rounded-[3rem] border-2 border-zinc-900 mb-10 relative group">
-              <p className="text-white font-mono break-all text-xs tracking-[0.2em] leading-relaxed opacity-80">{PIX_KEY}</p>
-              <button onClick={() => { navigator.clipboard.writeText(PIX_KEY); setCopyFeedback(true); setTimeout(() => setCopyFeedback(false), 2000); }} className="absolute -bottom-5 left-1/2 -translate-x-1/2 gold-gradient text-black px-8 py-3 rounded-full text-[10px] font-black shadow-2xl hover:scale-105 transition-transform tracking-widest uppercase">
-                {copyFeedback ? 'COPIADO COM SUCESSO' : 'COPIAR CHAVE PIX'}
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-6 bg-black/99 backdrop-blur-[50px]">
+          <div className="glass-card w-full max-w-xl p-16 rounded-[5rem] text-center animate-scale-up border-gold-500 shadow-[0_0_150px_rgba(212,175,55,0.2)]">
+            <h2 className="text-4xl font-serif gold-text font-black mb-10 uppercase tracking-tight">PAGAMENTO VIA PIX</h2>
+            <div className="bg-zinc-950 p-10 rounded-[3.5rem] border-2 border-zinc-900 mb-10">
+              <p className="text-white font-mono break-all text-xs opacity-60 mb-6 tracking-[0.2em]">{PIX_KEY}</p>
+              <button onClick={() => { navigator.clipboard.writeText(PIX_KEY); setCopyFeedback(true); setTimeout(() => setCopyFeedback(false), 2000); }} className="gold-gradient text-black px-12 py-4 rounded-full text-xs font-black uppercase shadow-2xl tracking-[0.2em]">
+                {copyFeedback ? 'CHAVE COPIADA COM SUCESSO!' : 'COPIAR CHAVE PIX'}
               </button>
             </div>
-            <div className="space-y-8">
-              <div className="text-left space-y-3">
-                <p className="text-[11px] text-zinc-500 font-black mb-2 tracking-[0.3em] uppercase ml-4">ANEXAR COMPROVANTE</p>
-                <input type="file" accept="image/*" onChange={(e) => setReceiptFile(e.target.files?.[0] || null)} className="w-full bg-zinc-950 border-2 border-zinc-900 rounded-[2rem] px-6 py-5 text-[11px] font-black text-zinc-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-[10px] file:font-black file:bg-zinc-800 file:text-zinc-400" />
-              </div>
-              <button onClick={handlePaymentFinish} className="w-full py-7 gold-gradient text-black font-black text-xl tracking-[0.3em] rounded-3xl uppercase shadow-2xl hover:scale-[1.02] active:scale-95 transition-all">CONCLUIR MINHA RESERVA</button>
-              <button onClick={() => setShowPayment(false)} className="text-[11px] text-zinc-700 font-black uppercase hover:text-white transition-colors tracking-widest">VOLTAR E REVISAR</button>
+            
+            <div className="text-left space-y-4 mb-10">
+               <label className="text-[11px] font-black text-zinc-500 ml-6 tracking-[0.4em] uppercase">ANEXAR COMPROVANTE (PDF/FOTO)</label>
+               <input 
+                required
+                type="file" 
+                accept="image/*,application/pdf" 
+                onChange={(e) => setReceiptFile(e.target.files?.[0] || null)} 
+                className="w-full bg-black/60 border-2 border-zinc-900 rounded-[2.5rem] px-8 py-6 text-xs font-black text-zinc-400 file:mr-6 file:py-3 file:px-6 file:rounded-full file:border-0 file:text-[10px] file:font-black file:bg-zinc-800 file:text-gold-500"
+               />
+               {!receiptFile && <p className="text-[10px] text-red-500 font-black ml-6 animate-pulse uppercase tracking-widest">* O ENVIO DO COMPROVANTE É OBRIGATÓRIO PARA VALIDAR A RESERVA</p>}
             </div>
+
+            <button 
+              onClick={handlePaymentFinish} 
+              disabled={!receiptFile}
+              className={`w-full py-8 font-black rounded-[2.5rem] text-xl shadow-2xl mb-6 transition-all uppercase tracking-[0.3em] ${receiptFile ? 'gold-gradient text-black hover:scale-[1.02]' : 'bg-zinc-900 text-zinc-700 cursor-not-allowed opacity-40'}`}
+            >
+              FINALIZAR AGORA
+            </button>
+            <button onClick={() => setShowPayment(false)} className="text-[11px] text-zinc-700 font-black uppercase tracking-[0.3em] hover:text-white transition-colors">VOLTAR E CORRIGIR DADOS</button>
           </div>
         </div>
       )}
 
       {showSuccess && (
-        <div className="fixed inset-0 z-[130] bg-[#050505] flex items-center justify-center p-6 text-center">
-          <div className="glass-card max-w-lg w-full p-16 rounded-[4.5rem] space-y-10 animate-scale-up border-gold-500/50 shadow-[0_0_150px_rgba(212,175,55,0.1)]">
-            <div className="w-28 h-28 gold-gradient rounded-full flex items-center justify-center mx-auto shadow-[0_0_50px_rgba(212,175,55,0.3)]">
+        <div className="fixed inset-0 z-[130] bg-black flex items-center justify-center p-6 text-center">
+          <div className="glass-card max-w-2xl w-full p-20 rounded-[6rem] space-y-10 animate-scale-up border-gold-500/50">
+            <div className="w-32 h-32 gold-gradient rounded-full flex items-center justify-center mx-auto shadow-[0_0_100px_rgba(212,175,55,0.4)]">
               <i className="fas fa-check text-5xl text-black"></i>
             </div>
-            <div>
-              <h1 className="text-5xl font-serif gold-text font-black mb-4 uppercase tracking-tight leading-none">RESERVA<br/>SOLICITADA!</h1>
-              <p className="text-zinc-500 text-[11px] font-black leading-relaxed uppercase tracking-[0.2em] px-4">ESTAMOS CONFERINDO SEU PAGAMENTO.<br/>VOCÊ SERÁ NOTIFICADO NO WHATSAPP<br/>ASSIM QUE TUDO FOR CONFIRMADO.</p>
-            </div>
-            <button onClick={() => { setShowSuccess(false); setCurrentDay(null); }} className="w-full py-6 gold-gradient text-black font-black rounded-3xl tracking-[0.3em] shadow-2xl uppercase text-base hover:scale-[1.03] transition-all">FINALIZAR ACESSO</button>
+            <h1 className="text-5xl font-serif gold-text font-black uppercase tracking-tight">SOLICITAÇÃO ENVIADA!</h1>
+            <p className="text-zinc-400 text-sm font-black leading-relaxed tracking-[0.2em] uppercase px-8">ESTAMOS VALIDANDO SEU COMPROVANTE. EM ALGUNS MINUTOS VOCÊ RECEBERÁ A CONFIRMAÇÃO NO WHATSAPP.</p>
+            <button onClick={() => { setShowSuccess(false); setCurrentDay(null); }} className="w-full py-8 gold-gradient text-black font-black rounded-[3rem] uppercase text-base shadow-2xl tracking-[0.5em] hover:scale-[1.02] transition-transform">CONCLUIR</button>
           </div>
         </div>
       )}
+
+      <ConciergeChat />
     </div>
   );
 };
