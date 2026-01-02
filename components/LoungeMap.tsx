@@ -23,83 +23,92 @@ const LoungeMap: React.FC<MapProps> = ({ reservations, onSelect, selectedId, day
     const isSelected = selectedId === id;
     const price = prices[id] || (type === ReservationType.VIP_BOOTH ? 1500 : 400);
 
-    let bgColor = 'bg-[#1a1a1a] border-zinc-800 hover:border-yellow-500';
-    if (status === 'reserved' || status === 'blocked') bgColor = 'bg-red-900/40 border-red-800 cursor-not-allowed';
-    if (isSelected) bgColor = 'bg-yellow-500/20 border-yellow-500 ring-2 ring-yellow-500';
+    let styles = 'bg-[#0f0f0f] border-zinc-800 hover:border-gold-500/50 cursor-pointer';
+    if (status === 'reserved') styles = 'bg-red-950/40 border-red-900/50 cursor-not-allowed';
+    if (status === 'blocked') styles = 'bg-zinc-900 border-zinc-950 opacity-50 cursor-not-allowed';
+    if (isSelected) styles = 'bg-gold-500/10 border-gold-500 ring-2 ring-gold-500/50 scale-[1.02] z-10';
 
     return (
       <button
         type="button"
         disabled={status !== 'available'}
         onClick={() => onSelect(id)}
-        className={`relative flex flex-col items-center justify-center transition-all border-2 rounded-lg p-2 ${bgColor} ${className}`}
+        className={`relative flex flex-col items-center justify-center transition-all duration-500 border-2 rounded-2xl p-2 ${styles} ${className}`}
       >
-        <span className="text-[10px] uppercase font-black opacity-40 mb-1">{type === ReservationType.VIP_BOOTH ? 'CAM' : 'MESA'}</span>
-        <span className="text-xl font-black text-white">{num}</span>
-        <span className="text-[9px] font-bold text-yellow-500 mt-1">R$ {price}</span>
+        <span className="text-[8px] uppercase font-black opacity-30 mb-1 tracking-widest">{type === ReservationType.VIP_BOOTH ? 'VIP' : 'MESA'}</span>
+        <span className="text-xl font-black text-white leading-none">{num}</span>
+        {status === 'available' && (
+          <span className="text-[9px] font-black text-gold-500 mt-2">R$ {Math.round(price)}</span>
+        )}
+        {status === 'reserved' && (
+          <span className="text-[8px] font-black text-red-500 mt-2">OCUPADO</span>
+        )}
       </button>
     );
   };
 
   return (
-    <div className="w-full bg-white/5 p-4 rounded-3xl border border-white/10 space-y-4 animate-fade-in uppercase">
+    <div className="w-full bg-white/5 p-8 rounded-[3rem] border border-white/5 space-y-6 animate-fade-in uppercase">
       {/* HEADER: PALCO */}
-      <div className="grid grid-cols-12 gap-2">
-        <div className="col-span-3 bg-red-600/20 border border-red-600/50 flex items-center justify-center text-[10px] font-black text-red-500 rounded-lg h-24">
-          STAFF
+      <div className="grid grid-cols-12 gap-3">
+        <div className="col-span-3 bg-red-950/20 border border-red-900/20 flex flex-col items-center justify-center rounded-2xl h-28">
+          <i className="fas fa-door-closed text-red-900 mb-1"></i>
+          <span className="text-[8px] font-black text-red-900 tracking-widest">PRIVATE</span>
         </div>
-        <div className="col-span-6 bg-zinc-800 border border-zinc-700 flex items-center justify-center text-2xl font-black tracking-[0.3em] rounded-lg text-white h-24">
-          PALCO
+        <div className="col-span-6 bg-zinc-900/50 border border-zinc-800 flex flex-col items-center justify-center rounded-2xl h-28">
+           <div className="w-2 h-2 bg-red-600 rounded-full animate-pulse mb-2"></div>
+           <span className="text-xl font-serif gold-text font-black tracking-[0.4em]">PALCO</span>
         </div>
         <div className="col-span-3">
-          <MapItem type={ReservationType.VIP_BOOTH} num="10" className="h-24" />
+          <MapItem type={ReservationType.VIP_BOOTH} num="10" className="h-28" />
         </div>
       </div>
 
       {/* MID SECTION */}
-      <div className="grid grid-cols-12 gap-4">
+      <div className="grid grid-cols-12 gap-6">
         {/* LEFT COLUMN */}
-        <div className="col-span-3 space-y-3">
-          <MapItem type={ReservationType.VIP_BOOTH} num="01" className="h-20" />
-          <MapItem type={ReservationType.VIP_BOOTH} num="02" className="h-20" />
-          <div className="flex items-center justify-center h-16 opacity-30">
-             <i className="fas fa-angles-left text-xl"></i>
+        <div className="col-span-3 space-y-4">
+          <MapItem type={ReservationType.VIP_BOOTH} num="01" className="h-24" />
+          <MapItem type={ReservationType.VIP_BOOTH} num="02" className="h-24" />
+          <div className="flex flex-col items-center justify-center h-20 opacity-10">
+             <i className="fas fa-chevron-left text-2xl mb-1"></i>
+             <span className="text-[8px] font-black">CORREDOR</span>
           </div>
-          <MapItem type={ReservationType.VIP_BOOTH} num="03" className="h-20" />
+          <MapItem type={ReservationType.VIP_BOOTH} num="03" className="h-24" />
         </div>
 
         {/* CENTER COLUMN (MESAS) */}
         <div className="col-span-6">
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-2 gap-4">
             {MESAS_CENTER.map((pair, idx) => (
               <React.Fragment key={idx}>
-                <MapItem type={ReservationType.TABLE_BISTRO} num={pair[0]} className="h-20" />
-                <MapItem type={ReservationType.TABLE_BISTRO} num={pair[1]} className="h-20" />
+                <MapItem type={ReservationType.TABLE_BISTRO} num={pair[0]} className="h-24 shadow-xl" />
+                <MapItem type={ReservationType.TABLE_BISTRO} num={pair[1]} className="h-24 shadow-xl" />
               </React.Fragment>
             ))}
           </div>
         </div>
 
         {/* RIGHT COLUMN */}
-        <div className="col-span-3 space-y-3">
-          <MapItem type={ReservationType.VIP_BOOTH} num="09" className="h-28" />
-          <MapItem type={ReservationType.VIP_BOOTH} num="08" className="h-28" />
-          <MapItem type={ReservationType.VIP_BOOTH} num="07" className="h-28" />
+        <div className="col-span-3 space-y-4">
+          <MapItem type={ReservationType.VIP_BOOTH} num="09" className="h-32" />
+          <MapItem type={ReservationType.VIP_BOOTH} num="08" className="h-32" />
+          <MapItem type={ReservationType.VIP_BOOTH} num="07" className="h-32" />
         </div>
       </div>
 
       {/* BOTTOM ROW */}
-      <div className="grid grid-cols-3 gap-3">
-        <MapItem type={ReservationType.VIP_BOOTH} num="04" className="h-24" />
-        <MapItem type={ReservationType.VIP_BOOTH} num="05" className="h-24" />
-        <MapItem type={ReservationType.VIP_BOOTH} num="06" className="h-24" />
+      <div className="grid grid-cols-3 gap-4">
+        <MapItem type={ReservationType.VIP_BOOTH} num="04" className="h-28" />
+        <MapItem type={ReservationType.VIP_BOOTH} num="05" className="h-28" />
+        <MapItem type={ReservationType.VIP_BOOTH} num="06" className="h-28" />
       </div>
 
       {/* LEGEND */}
-      <div className="flex justify-center flex-wrap gap-4 text-[10px] font-black pt-4 border-t border-white/5">
-        <div className="flex items-center gap-2"><div className="w-3 h-3 bg-zinc-800 rounded-sm"></div> DISPONÍVEL</div>
-        <div className="flex items-center gap-2"><div className="w-3 h-3 bg-red-900/40 rounded-sm"></div> OCUPADO</div>
-        <div className="flex items-center gap-2"><div className="w-3 h-3 bg-yellow-500/50 rounded-sm"></div> SELECIONADO</div>
+      <div className="flex justify-center flex-wrap gap-6 text-[9px] font-black pt-8 border-t border-white/5 opacity-60">
+        <div className="flex items-center gap-3"><div className="w-2 h-2 bg-zinc-800 rounded-full"></div> LIVRE</div>
+        <div className="flex items-center gap-3"><div className="w-2 h-2 bg-red-900 rounded-full"></div> RESERVADO</div>
+        <div className="flex items-center gap-3"><div className="w-2 h-2 bg-gold-500 rounded-full"></div> SELECIONADO</div>
       </div>
     </div>
   );

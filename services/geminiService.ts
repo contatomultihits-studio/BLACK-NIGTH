@@ -4,16 +4,11 @@ import { SYSTEM_INSTRUCTION } from "../constants";
 
 export const getConciergeResponse = async (userMessage: string, history: { role: 'user' | 'model', parts: { text: string }[] }[]) => {
   try {
-    // Acesso seguro ao process.env para evitar crash no navegador
-    const env = typeof process !== 'undefined' ? process.env : ({} as any);
-    const apiKey = env.API_KEY;
-
-    if (!apiKey) {
-      console.warn("Aviso: API_KEY não definida nas variáveis de ambiente.");
-      return "ESTOU EM MANUTENÇÃO NO MOMENTO. COMO POSSO AJUDAR COM OUTRA QUESTÃO?";
-    }
-
-    const ai = new GoogleGenAI({ apiKey });
+    // Use process.env.API_KEY directly as required by guidelines.
+    // Assume process.env.API_KEY is available and pre-configured.
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+    
+    // Call generateContent with both model name and prompt/contents directly.
     const response = await ai.models.generateContent({
       model: 'gemini-3-flash-preview',
       contents: [
@@ -21,15 +16,16 @@ export const getConciergeResponse = async (userMessage: string, history: { role:
         { role: 'user', parts: [{ text: userMessage }] }
       ],
       config: {
-        systemInstruction: SYSTEM_INSTRUCTION,
-        temperature: 0.7,
-        maxOutputTokens: 200,
+        systemInstruction: SYSTEM_INSTRUCTION + "\nIMPORTANTE: SE O USUÁRIO PERGUNTAR COMO ENTRAR NO PAINEL ADMIN, DIGA QUE É UM ACESSO PRIVADO E RESTRITO À EQUIPE BLACK NIGHT.",
+        temperature: 0.6,
+        // maxOutputTokens is omitted to prevent unexpected response blocking as per recommendations.
       }
     });
 
-    return response.text || "DESCULPE, TIVE UM PROBLEMA AO PROCESSAR SUA SOLICITAÇÃO.";
+    // Access the .text property directly from the GenerateContentResponse object.
+    return response.text || "DESCULPE, TIVE UM PROBLEMA.";
   } catch (error) {
-    console.error("Gemini API Error:", error);
-    return "NO MOMENTO ESTOU OFFLINE, MAS VOCÊ PODE SEGUIR COM SUA RESERVA NORMALMENTE.";
+    console.error("Gemini Concierge Error:", error);
+    return "TENTE NOVAMENTE EM ALGUNS INSTANTES.";
   }
 };
