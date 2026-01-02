@@ -32,17 +32,17 @@ const LoungeMap: React.FC<MapProps> = ({ reservations, onSelect, selectedId, day
     const isSelected = selectedId === id;
     const price = prices[id] || (type === ReservationType.VIP_BOOTH ? 1500 : 400);
 
+    // Identifica se o local está ocupado de qualquer forma (Reserva, Pendente ou Bloqueio ADM)
+    const isOccupied = status === 'reserved' || status === 'pending' || status === 'blocked';
+
     let styles = 'bg-[#0f0f0f] border-zinc-800 hover:border-gold-500/50 cursor-pointer shadow-lg';
     let label = 'R$ ' + Math.round(price);
     let isDisabled = false;
 
-    if (status === 'reserved' || status === 'pending') {
-      styles = 'bg-red-950/20 border-red-900/40 cursor-not-allowed opacity-90 grayscale-[0.5]';
-      label = status === 'pending' ? 'EM PROCESSO' : 'OCUPADO';
-      isDisabled = true;
-    } else if (status === 'blocked') {
-      styles = 'bg-zinc-900/50 border-zinc-950 opacity-40 cursor-not-allowed grayscale';
-      label = 'INDISPONÍVEL';
+    if (isOccupied) {
+      // APLICAÇÃO DO VERMELHO PARA BLOQUEADOS (SOLICITAÇÃO DO USUÁRIO)
+      styles = 'bg-red-950/40 border-red-600/60 cursor-not-allowed opacity-90 shadow-[0_0_20px_rgba(220,38,38,0.3)]';
+      label = status === 'blocked' ? 'RESERVADO ADM' : (status === 'pending' ? 'EM PROCESSO' : 'OCUPADO');
       isDisabled = true;
     }
 
@@ -59,14 +59,14 @@ const LoungeMap: React.FC<MapProps> = ({ reservations, onSelect, selectedId, day
       >
         <span className="text-[8px] uppercase font-black opacity-40 mb-2 tracking-[0.3em]">{type === ReservationType.VIP_BOOTH ? 'CAMAROTE' : 'BISTRÔ'}</span>
         <span className="text-3xl font-black text-white leading-none tracking-tighter">{num}</span>
-        <span className={`text-[10px] font-black mt-3 tracking-widest ${status === 'available' ? 'text-gold-500' : 'text-zinc-600'}`}>{label}</span>
+        <span className={`text-[10px] font-black mt-3 tracking-widest ${status === 'available' ? 'text-gold-500' : 'text-zinc-400'}`}>{label}</span>
       </button>
     );
   };
 
   return (
     <div className="w-full bg-white/5 p-12 rounded-[5rem] border border-white/5 space-y-12 animate-fade-in uppercase">
-      {/* HEADER: PALCO REDENHADO */}
+      {/* HEADER: PALCO */}
       <div className="grid grid-cols-12 gap-6">
         <div className="col-span-3 bg-red-950/10 border-2 border-red-900/10 flex flex-col items-center justify-center rounded-[2.5rem] h-36 opacity-30 select-none">
           <i className="fas fa-lock-open text-red-900 text-xl mb-2"></i>
@@ -122,7 +122,7 @@ const LoungeMap: React.FC<MapProps> = ({ reservations, onSelect, selectedId, day
 
       <div className="flex justify-center flex-wrap gap-12 text-[9px] font-black pt-12 border-t border-white/5 opacity-50 tracking-[0.4em] uppercase">
         <div className="flex items-center gap-3"><div className="w-3 h-3 bg-zinc-800 rounded-full border border-white/10"></div> DISPONÍVEL</div>
-        <div className="flex items-center gap-3"><div className="w-3 h-3 bg-red-900 rounded-full"></div> RESERVADO</div>
+        <div className="flex items-center gap-3"><div className="w-3 h-3 bg-red-600 rounded-full shadow-[0_0_15px_rgba(220,38,38,0.4)]"></div> OCUPADO / BLOQUEADO</div>
         <div className="flex items-center gap-3"><div className="w-3 h-3 bg-gold-500 rounded-full shadow-[0_0_15px_gold]"></div> SELECIONADO</div>
       </div>
     </div>
