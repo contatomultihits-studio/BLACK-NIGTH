@@ -4,7 +4,16 @@ import { SYSTEM_INSTRUCTION } from "../constants";
 
 export const getConciergeResponse = async (userMessage: string, history: { role: 'user' | 'model', parts: { text: string }[] }[]) => {
   try {
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    // Acesso seguro ao process.env para evitar crash no navegador
+    const env = typeof process !== 'undefined' ? process.env : ({} as any);
+    const apiKey = env.API_KEY;
+
+    if (!apiKey) {
+      console.warn("Aviso: API_KEY não definida nas variáveis de ambiente.");
+      return "ESTOU EM MANUTENÇÃO NO MOMENTO. COMO POSSO AJUDAR COM OUTRA QUESTÃO?";
+    }
+
+    const ai = new GoogleGenAI({ apiKey });
     const response = await ai.models.generateContent({
       model: 'gemini-3-flash-preview',
       contents: [
@@ -18,9 +27,9 @@ export const getConciergeResponse = async (userMessage: string, history: { role:
       }
     });
 
-    return response.text || "Desculpe, tive um problema ao processar sua solicitação. Como posso ajudar?";
+    return response.text || "DESCULPE, TIVE UM PROBLEMA AO PROCESSAR SUA SOLICITAÇÃO.";
   } catch (error) {
     console.error("Gemini API Error:", error);
-    return "No momento estou offline, mas você pode seguir com sua reserva normalmente.";
+    return "NO MOMENTO ESTOU OFFLINE, MAS VOCÊ PODE SEGUIR COM SUA RESERVA NORMALMENTE.";
   }
 };
